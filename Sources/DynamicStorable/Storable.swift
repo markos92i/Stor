@@ -1,30 +1,40 @@
 //
 //  Storable.swift
-//  DynamicStorable
+//  Dynamic Storable
 //
 //  Created by Marcos del Castillo Camacho on 23/03/2026.
 //
 
 import SwiftUI
 
+/// A property wrapper that persists `Codable` values to disk and provides
+/// automatic SwiftUI view invalidation.
+///
+/// Uses `@State` for reliable SwiftUI observation and a shared `StorableStore`
+/// cache so that writes from any context (ViewModels, Prefs) are visible
+/// to all views on next re-render.
+///
+/// Usage:
+/// ```swift
+/// @Storable("user.search.history") var history: [SearchDto] = []
+/// ```
 @propertyWrapper public struct Storable<T: Sendable>: DynamicProperty, Sendable {
     private let key: String
-    private var url: URL?
+    private let url: URL?
 
-    @State private var defaultValue: T
-                
+    @State private var storage: T
+
     public var wrappedValue: T {
         get {
-            guard let data = read() else { return defaultValue }
-            guard let decoded: T = try? Storable<T>.decode(data) else {
-                #if DEBUG
-                print("⚠️ Storable: failed to decode '\(key)' — returning default")
-                #endif
-                return defaultValue
+            // Read from shared cache (source of truth). Falls back to local @State.
+            if let cached: T = StorableStore.shared.value(for: key) {
+                return cached
             }
-            return decoded
+            return storage
         }
         nonmutating set {
+            storage = newValue
+
             var hasValue = false
             if T.self is ExpressibleByNilLiteral.Type {
                 if "\(newValue)" != "nil" { hasValue = true }
@@ -33,28 +43,28 @@ import SwiftUI
             }
 
             if hasValue {
-                if let data = try? Storable<T>.encode(newValue) {
-                    write(data)
-                }
+                StorableStore.shared.set(newValue, for: key, url: url)
             } else {
-                delete()
+                StorableStore.shared.set(nil as T?, for: key, url: url)
             }
-            defaultValue = newValue
         }
     }
-    
-    public var projectedValue: Binding<T> { .init(get: { wrappedValue }, set: { wrappedValue = $0 }) }
-    
+
+    public var projectedValue: Binding<T> {
+        .init(get: { wrappedValue }, set: { wrappedValue = $0 })
+    }
+
     // MARK: - Inits
 
     private init(wrappedValue: T, key: String) {
         self.key = key
         self.url = Self.storageURL(for: key)
 
-        if let url, let data = try? Data(contentsOf: url), let value = try? Storable<T>.decode(data) {
-            _defaultValue = State(initialValue: value)
+        // Hydrate: cache first, then disk, then default.
+        if let value: T = StorableStore.shared.hydrate(key: key, url: Self.storageURL(for: key), as: T.self) {
+            _storage = State(initialValue: value)
         } else {
-            _defaultValue = State(initialValue: wrappedValue)
+            _storage = State(initialValue: wrappedValue)
         }
     }
 
@@ -74,63 +84,18 @@ import SwiftUI
     public init(_ key: String) where T == UIImage? {
         self.key = key
         self.url = Self.storageURL(for: key)
-        if let url, let data = try? Data(contentsOf: url), let value = try? Storable<T>.decode(data) {
-            _defaultValue = State(initialValue: value)
+        if let value: T = StorableStore.shared.hydrate(key: key, url: Self.storageURL(for: key), as: T.self) {
+            _storage = State(initialValue: value)
         } else {
-            _defaultValue = State(initialValue: nil)
+            _storage = State(initialValue: nil)
         }
     }
     #endif
 
-    // MARK: - Encoding
+    // MARK: - Storage URL
 
-    private static func encode(_ value: T) throws -> Data {
-        if let raw = value as? RawStorable { return raw.toData() }
-        guard let codable = value as? Codable else { throw StorableError.conversionError }
-        return try JSONEncoder().encode(codable)
-    }
-        
-    private static func decode(_ data: Data) throws(StorableError) -> T {
-        if let type = T.self as? RawStorable.Type {
-            guard let value = type.fromData(data) as? T else { throw .conversionError }
-            return value
-        }
-        if let optionalType = T.self as? AnyOptionalStorable.Type, let rawType = optionalType.wrappedStorableType {
-            guard let value = rawType.fromData(data) as? T else { throw .conversionError }
-            return value
-        }
-        guard let type = T.self as? Codable.Type else { throw .conversionError }
-        do {
-            return try JSONDecoder().decode(type, from: data) as! T
-        } catch {
-            throw .conversionError
-        }
-    }
-
-    // MARK: - File I/O
-    
     private static func storageURL(for key: String) -> URL? {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent(key)
-    }
-
-    private func read() -> Data? {
-        guard let url else { return nil }
-        return try? Data(contentsOf: url)
-    }
-    
-    private func write(_ data: Data) {
-        guard let url else {
-            #if DEBUG
-            print("⚠️ Storable: failed to write '\(key)' — invalid URL")
-            #endif
-            return
-        }
-        try? data.write(to: url, options: .atomic)
-    }
-    
-    private func delete() {
-        guard let url, FileManager.default.fileExists(atPath: url.path()) else { return }
-        try? FileManager.default.removeItem(at: url)
     }
 }
 
@@ -140,10 +105,10 @@ extension Storable where T: ExpressibleByNilLiteral {
     private init(key: String) {
         self.key = key
         self.url = Self.storageURL(for: key)
-        if let url, let data = try? Data(contentsOf: url), let value = try? Storable<T>.decode(data) {
-            _defaultValue = State(initialValue: value)
+        if let value: T = StorableStore.shared.hydrate(key: key, url: Self.storageURL(for: key), as: T.self) {
+            _storage = State(initialValue: value)
         } else {
-            _defaultValue = State(initialValue: nil)
+            _storage = State(initialValue: nil)
         }
     }
 
@@ -177,10 +142,31 @@ extension UIImage: RawStorable {
 
 // MARK: - Optional support for RawStorable
 
-private protocol AnyOptionalStorable {
+protocol AnyOptionalStorable {
     static var wrappedStorableType: RawStorable.Type? { get }
 }
 
 extension Optional: AnyOptionalStorable {
     static var wrappedStorableType: RawStorable.Type? { Wrapped.self as? RawStorable.Type }
+}
+
+// MARK: - Optional support for Codable
+
+/// Enables direct encode/decode of the wrapped Codable type inside an Optional.
+protocol AnyCodableOptional {
+    func encodeWrappedValue() -> Data?
+    static func decodeWrappedValue(from data: Data) -> Any?
+}
+
+extension Optional: AnyCodableOptional {
+    func encodeWrappedValue() -> Data? {
+        guard let value = self, let codable = value as? any Codable else { return nil }
+        return try? JSONEncoder().encode(codable)
+    }
+
+    static func decodeWrappedValue(from data: Data) -> Any? {
+        guard let codableType = Wrapped.self as? any Codable.Type else { return nil }
+        guard let decoded = try? JSONDecoder().decode(codableType, from: data) else { return nil }
+        return Self.some(decoded as! Wrapped)
+    }
 }

@@ -1,6 +1,6 @@
 //
 //  StorableError.swift
-//  DynamicStorable
+//  Dynamic Storable
 //
 //  Created by Marcos del Castillo Camacho on 23/03/2026.
 //
