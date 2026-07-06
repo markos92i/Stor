@@ -1,0 +1,24 @@
+{
+  "configurations" : [
+    {
+      "id" : "62FE7919-FCF7-4B7C-8E1A-E98487A2955F",
+      "name" : "Test Scheme Action",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:",
+        "identifier" : "DynamicStorableTests",
+        "name" : "DynamicStorableTests"
+      }
+    }
+  ],
+  "version" : 1
+}
