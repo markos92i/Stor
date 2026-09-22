@@ -80,7 +80,7 @@ final class StorableObserver<T: Sendable>: @unchecked Sendable {
             self._state = Mutex(defaultValue)
         }
 
-        Task { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
             self.token = await store.subscribe(key) { [weak self] (newValue: T?) in
                 self?.update(newValue)
