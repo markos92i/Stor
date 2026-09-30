@@ -424,8 +424,8 @@ struct StorableTest {
 
 // MARK: - @Storable reactivity simulation
 
-/// Verifica el contrato de reactividad de @Storable usando subscribe() directamente.
-/// Es equivalente a lo que StorableObserver hace internamente para invalidar vistas SwiftUI.
+/// Verifies @Storable's reactivity contract using subscribe() directly.
+/// Equivalent to what StorableObserver does internally to invalidate SwiftUI views.
 @Suite("@Storable reactivity via subscribe")
 struct StorableReactivityTest {
 
