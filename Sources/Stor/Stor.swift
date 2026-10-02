@@ -126,7 +126,9 @@ public actor Stor {
 
     private func notifySubscribers(for key: String, data: Data?) {
         guard let handlers = subscriptions[key] else { return }
-        for handler in handlers.values { handler(data) }
+        for handler in handlers.values {
+            Task { @MainActor in handler(data) }
+        }
     }
 
     private static let defaultEncoder: JSONEncoder = {
