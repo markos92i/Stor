@@ -23,7 +23,7 @@ extension LogChannel {
 
 // MARK: - Store kind
 
-/// Which backend a store writes to: picks the channel and the icon of its entries.
+/// Which backend a store writes to: picks the channel (category) of its entries.
 enum StoreKind: Sendable {
     case disk, keychain, custom
 
@@ -40,13 +40,6 @@ enum StoreKind: Sendable {
         case .disk: .disk
         case .keychain: .keychain
         case .custom: .storage
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .disk, .custom: "􀈷"
-        case .keychain: "􁠱"
         }
     }
 }
@@ -81,22 +74,23 @@ enum StorLog: LogEntry {
         }
     }
 
+    // 􀄌 arrow.right.square: comes into the app. 􀄊 arrow.left.square: goes to the store. 􀟕 key.
     @LogBuilder
     func lines(bodies: Bool) -> [String] {
         switch self {
-        case .read(let key, let store, let bytes):
-            "\(store.icon) read\t􀈕 \(key)\t\(bytes?.byteFormatted ?? "􀓔")"
-        case .write(let key, let store, let bytes, let elapsed):
-            "\(store.icon) write\t􀈕 \(key)\t\(bytes.byteFormatted)\t􀐫 \(elapsed.logFormatted)"
-        case .remove(let key, let store):
-            "\(store.icon) remove\t􀈕 \(key)"
-        case .purge(let store, let keys):
-            "\(store.icon) purge\t\(keys) keys"
-        case .unavailable(let key, let store, let detail):
-            "􀇿 \(store.icon) read\t􀈕 \(key)\tunavailable, read again on next access"
+        case .read(let key, _, let bytes):
+            "􀄌 read\t􀟕 \(key)\t\(bytes?.byteFormatted ?? "􀓔")"
+        case .write(let key, _, let bytes, let elapsed):
+            "􀄊 write\t􀟕 \(key)\t\(bytes.byteFormatted)\t􀐫 \(elapsed.logFormatted)"
+        case .remove(let key, _):
+            "􀄊 remove\t􀟕 \(key)"
+        case .purge(_, let keys):
+            "􀄊 purge\t\(keys) keys"
+        case .unavailable(let key, _, let detail):
+            "􀇿 read\t􀟕 \(key)\tunavailable, read again on next access"
             "􀺾 \(detail)"
-        case .failed(let key, let store, let step, let detail):
-            "􀇾 \(store.icon) \(step)\t􀈕 \(key)"
+        case .failed(let key, _, let step, let detail):
+            "􀇾 \(step)\t􀟕 \(key)"
             "􀺾 \(detail)"
         }
     }
