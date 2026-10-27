@@ -7,113 +7,109 @@
 
 import Foundation
 import Observation
-import Synchronization
 
 // MARK: - StorableRegistry
 
 /// Central observable registry that bridges `Stor` persistence with SwiftUI reactivity.
 ///
-/// This singleton maintains an in-memory cache of all `@Storable` values and provides
-/// `@Observable` reactivity. When values change (either locally or from `Stor` programmatic
-/// API), all SwiftUI views observing that key automatically update.
-///
-/// Thread-safe: reads/writes use `Mutex`. SwiftUI notifications dispatch to MainActor.
+/// This singleton keeps an in-memory cache of every `@Storable` and `@Keychain` value, per store
+/// location and key. When a value changes (from a property or from the `Stor` programmatic API),
+/// every SwiftUI view observing it updates.
 @MainActor @Observable
 public final class StorableRegistry {
-    
+
     /// Shared singleton instance.
     public static let shared = StorableRegistry()
-    
-    /// In-memory cache of values by key. Access via subscript.
+
+    /// A value is identified by where it lives and its key: two stores may use the same key.
+    private struct Slot: Hashable {
+        let location: String
+        let key: String
+
+        init(_ key: String, in store: Stor) {
+            self.location = store.location
+            self.key = key
+        }
+    }
+
     @ObservationIgnored
-    private var cache: [String: any Sendable] = [:]
-    
-    /// Tracks which keys have active subscriptions to Stor.
+    private var cache: [Slot: any Sendable] = [:]
+
     @ObservationIgnored
-    private var subscriptions: [String: SubscriptionToken] = [:]
-    
-    /// Version counters for fine-grained observation.
-    /// Incrementing a key's version triggers SwiftUI updates for observers of that key.
-    private var versions: [String: UInt64] = [:]
-    
+    private var subscriptions: [Slot: SubscriptionToken] = [:]
+
+    /// Version counters for fine-grained observation: bumping one updates its observers.
+    private var versions: [Slot: UInt64] = [:]
+
     private init() {}
-    
+
     // MARK: - Public API
-    
-    /// Gets the current value for a key, or returns the default if not cached.
-    ///
-    /// This method establishes an observation dependency — SwiftUI views calling this
-    /// will re-render when the value changes.
-    public func get<T: Sendable>(_ key: String, default defaultValue: T) -> T {
-        // Touch version to establish observation
-        _ = versions[key, default: 0]
-        return (cache[key] as? T) ?? defaultValue
+
+    /// The current value, read from the store the first time. Establishes observation.
+    public func get<T: Sendable>(_ key: String, default defaultValue: T, store: Stor = .shared) -> T {
+        let slot = Slot(key, in: store)
+        _ = versions[slot, default: 0]
+        if let cached = cached(slot, as: T.self) { return cached }
+        return hydrate(key, default: defaultValue, store: store)
     }
-    
-    /// Sets a value for a key. Persists to `Stor` and notifies observers.
-    ///
-    /// Safe to call from MainActor (SwiftUI). Persistence happens async.
+
+    /// Sets a value, persists it in the background and notifies observers.
     public func set<T: Sendable>(_ key: String, _ value: T, store: Stor = .shared) {
-        cache[key] = value
-        versions[key, default: 0] &+= 1
-        
-        // Persist asynchronously
-        Task {
-            await store.set(key, value)
-        }
+        let slot = Slot(key, in: store)
+        cache[slot] = value
+        versions[slot, default: 0] &+= 1
+        store.persist(key, value)
     }
-    
-    /// Sets a value from an external source (background write). Does not persist (already done).
-    public func setFromExternal<T: Sendable>(_ key: String, _ value: T) {
-        cache[key] = value
-        versions[key, default: 0] &+= 1
+
+    /// Sets a value written off the main actor. Does not persist (already done).
+    public func setFromExternal<T: Sendable>(_ key: String, _ value: T, store: Stor = .shared) {
+        let slot = Slot(key, in: store)
+        cache[slot] = value
+        versions[slot, default: 0] &+= 1
     }
-    
-    /// Hydrates a key from disk if not already cached. Call during init.
-    ///
-    /// - Returns: The hydrated value or the default.
+
+    /// Reads a key from the store if it isn't cached. An unavailable value (a locked keychain)
+    /// isn't cached: the next access reads it again.
     public func hydrate<T: Sendable>(_ key: String, default defaultValue: T, store: Stor = .shared) -> T {
-        // Already cached?
-        if let cached = cache[key] as? T {
-            return cached
+        let slot = Slot(key, in: store)
+        if let cached = cached(slot, as: T.self) { return cached }
+
+        let value: T
+        switch store.lookup(key, as: T.self) {
+        case .found(let found): value = found
+        case .missing: value = defaultValue
+        case .unavailable: return defaultValue
         }
-        
-        // Hydrate from disk synchronously
-        if let data = store.backend.readSync(key),
-           let decoded: T = StorableCoder.decode(data, as: T.self, using: store.decoder) {
-            cache[key] = decoded
-            ensureSubscription(key: key, store: store, type: T.self)
-            return decoded
-        }
-        
-        // Use default
-        cache[key] = defaultValue
-        ensureSubscription(key: key, store: store, type: T.self)
-        return defaultValue
+        cache[slot] = value
+        ensureSubscription(slot, store: store, type: T.self)
+        return value
     }
-    
+
     // MARK: - Private
-    
-    /// Ensures we're subscribed to Stor changes for this key.
-    private func ensureSubscription<T: Sendable>(key: String, store: Stor, type: T.Type) {
-        guard subscriptions[key] == nil else { return }
-        
+
+    /// `nil` only when the slot isn't cached: casting a missing entry to an optional `T` would give a cached `nil`.
+    private func cached<T>(_ slot: Slot, as type: T.Type) -> T? {
+        guard let entry = cache[slot] else { return nil }
+        return entry as? T
+    }
+
+    /// Follows `Stor` changes for this slot (programmatic writes, removals, purges).
+    private func ensureSubscription<T: Sendable>(_ slot: Slot, store: Stor, type: T.Type) {
+        guard subscriptions[slot] == nil else { return }
+
         Task { [weak self] in
-            guard let self else { return }
-            let token = await store.subscribe(key) { [weak self] (newValue: T?) in
+            let token = await store.subscribe(slot.key) { [weak self] (newValue: T?) in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     if let newValue {
-                        self.cache[key] = newValue
+                        self.cache[slot] = newValue
                     } else {
-                        self.cache.removeValue(forKey: key)
+                        self.cache.removeValue(forKey: slot)
                     }
-                    self.versions[key, default: 0] &+= 1
+                    self.versions[slot, default: 0] &+= 1
                 }
             }
-            await MainActor.run { [weak self] in
-                self?.subscriptions[key] = token
-            }
+            self?.subscriptions[slot] = token
         }
     }
 }

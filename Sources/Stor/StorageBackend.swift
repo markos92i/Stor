@@ -7,11 +7,22 @@
 
 import Foundation
 
+// MARK: - ReadResult
+
+/// A synchronous read: `unavailable` (e.g. a locked keychain) is retried on the next access.
+public enum ReadResult: Sendable {
+    case found(Data)
+    case missing
+    case unavailable
+}
+
 // MARK: - StorageBackend
 
 /// Protocol for pluggable storage backends. Must be an actor.
-/// `readSync(_:)` is nonisolated for synchronous hydration at init.
+/// `readSync(_:)` is nonisolated for synchronous reads from any thread.
 public protocol StorageBackend: Actor, Sendable {
+    /// Where the data lives (a directory, a keychain service). Two stores at the same location share values.
+    nonisolated var location: String { get }
     func write(_ data: Data, for key: String) async
     func read(_ key: String) async -> Data?
     func readAll() async -> [String: Data]
@@ -19,7 +30,7 @@ public protocol StorageBackend: Actor, Sendable {
     func removeAll() async
     func purge() async
     func allKeys() async -> [String]
-    nonisolated func readSync(_ key: String) -> Data?
+    nonisolated func readSync(_ key: String) -> ReadResult
 }
 
 // MARK: - Default implementations

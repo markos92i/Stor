@@ -12,5 +12,6 @@ import SwiftSyntaxMacros
 struct StorMacrosPlugin: CompilerPlugin {
     let providingMacros: [Macro.Type] = [
         StorableMacro.self,
+        KeychainMacro.self,
     ]
 }

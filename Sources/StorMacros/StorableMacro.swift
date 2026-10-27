@@ -9,130 +9,130 @@ import SwiftSyntax
 import SwiftSyntaxMacros
 import SwiftDiagnostics
 
-/// `@Storable` transforms a stored property into one backed by `Stor` persistence
-/// with automatic SwiftUI reactivity.
-///
-/// Works in both SwiftUI Views and `@Observable` classes:
+/// `@Storable("key")` backs a stored property with `Stor` (a file) and adds a `$property` binding.
 ///
 /// ```swift
-/// // In a View
-/// struct SettingsView: View {
-///     @Storable("theme") var theme: Theme = .system
-///     
-///     var body: some View {
-///         Picker("Theme", selection: $theme) { ... }
-///     }
+/// @Storable("theme") var theme: Theme = .system
+/// // expands to
+/// var theme: Theme {
+///     get { _theme_stor.value }
+///     nonmutating set { _theme_stor.value = newValue }
 /// }
-///
-/// // In an @Observable class
-/// @Observable @MainActor
-/// final class AppState {
-///     @Storable("config") var config: Config = .default
-/// }
-/// ```
-///
-/// ## How it works
-/// - Values are persisted to `Stor` (disk-backed JSON storage)
-/// - Reactivity comes from `StorableRegistry`, an `@Observable` singleton
-/// - Changes from anywhere (UI or programmatic) propagate to all observers
-/// - Thread-safe: programmatic changes from background dispatch to MainActor
-///
-/// ## Programmatic access
-/// Use `Stor` directly for background operations:
-/// ```swift
-/// // From any context (background task, actor, etc.)
-/// await Stor.shared.set("config", newConfig)
-/// // All @Storable("config") properties update automatically
+/// private let _theme_stor = StorableBackend<Theme>(key: "theme", default: .system, store: .shared)
+/// var $theme: StorableBackend<Theme>.Binding { _theme_stor.binding }
 /// ```
 public struct StorableMacro: AccessorMacro, PeerMacro {
-    
-    // MARK: - AccessorMacro
-    
+    static let backing = BackingMacro(name: "Storable", storeLabel: "store")
+
     public static func expansion(
         of node: AttributeSyntax,
         providingAccessorsOf declaration: some DeclSyntaxProtocol,
         in context: some MacroExpansionContext
     ) throws -> [AccessorDeclSyntax] {
-        guard let varDecl = declaration.as(VariableDeclSyntax.self),
-              let binding = varDecl.bindings.first,
-              let identifier = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else {
-            throw MacroError.message("@Storable can only be applied to stored properties")
-        }
-        
-        let backingName = "_\(identifier)_stor"
-        
-        // Simple accessors that delegate to the backing storage.
-        // Reactivity comes from StorableRegistry being @Observable.
-        // nonmutating set allows using in static let singletons.
-        let getter: AccessorDeclSyntax = """
-            get {
-                \(raw: backingName).value
-            }
-            """
-        
-        let setter: AccessorDeclSyntax = """
-            nonmutating set {
-                \(raw: backingName).value = newValue
-            }
-            """
-        
-        return [getter, setter]
+        try backing.accessors(of: declaration)
     }
-    
-    // MARK: - PeerMacro
-    
+
     public static func expansion(
         of node: AttributeSyntax,
         providingPeersOf declaration: some DeclSyntaxProtocol,
         in context: some MacroExpansionContext
     ) throws -> [DeclSyntax] {
-        guard let varDecl = declaration.as(VariableDeclSyntax.self),
-              let binding = varDecl.bindings.first,
-              let identifier = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else {
-            throw MacroError.message("@Storable can only be applied to stored properties")
-        }
-        
-        // Extract type annotation
-        guard let typeAnnotation = binding.typeAnnotation?.type else {
-            throw MacroError.message("@Storable requires explicit type annotation")
+        try backing.peers(of: node, declaration)
+    }
+}
+
+/// `@Keychain("key")`: the same expansion as `@Storable`, backed by a `KeychainStore`.
+public struct KeychainMacro: AccessorMacro, PeerMacro {
+    static let backing = BackingMacro(name: "Keychain", storeLabel: "keychain")
+
+    public static func expansion(
+        of node: AttributeSyntax,
+        providingAccessorsOf declaration: some DeclSyntaxProtocol,
+        in context: some MacroExpansionContext
+    ) throws -> [AccessorDeclSyntax] {
+        try backing.accessors(of: declaration)
+    }
+
+    public static func expansion(
+        of node: AttributeSyntax,
+        providingPeersOf declaration: some DeclSyntaxProtocol,
+        in context: some MacroExpansionContext
+    ) throws -> [DeclSyntax] {
+        try backing.peers(of: node, declaration)
+    }
+}
+
+// MARK: - Shared expansion
+
+struct BackingMacro {
+    /// The attribute name, for diagnostics.
+    let name: String
+    /// The `StorableBackend` init label the `store:` argument goes to.
+    let storeLabel: String
+
+    func accessors(of declaration: some DeclSyntaxProtocol) throws -> [AccessorDeclSyntax] {
+        let identifier = try identifier(of: declaration)
+        let backingName = "_\(identifier)_stor"
+
+        // `nonmutating set` allows using it in `static let` singletons.
+        let getter: AccessorDeclSyntax = """
+            get {
+                \(raw: backingName).value
+            }
+            """
+        let setter: AccessorDeclSyntax = """
+            nonmutating set {
+                \(raw: backingName).value = newValue
+            }
+            """
+        return [getter, setter]
+    }
+
+    func peers(of node: AttributeSyntax, _ declaration: some DeclSyntaxProtocol) throws -> [DeclSyntax] {
+        let identifier = try identifier(of: declaration)
+        guard let binding = declaration.as(VariableDeclSyntax.self)?.bindings.first,
+              let typeAnnotation = binding.typeAnnotation?.type else {
+            throw MacroError.message("@\(name) requires explicit type annotation")
         }
         let typeName = typeAnnotation.trimmedDescription
-        
-        // Extract key from macro arguments: @Storable("key") or @Storable("key", store: .custom)
+
+        // @Name("key") or @Name("key", store: .custom)
         guard let arguments = node.arguments?.as(LabeledExprListSyntax.self),
               let firstArg = arguments.first,
               firstArg.label == nil else {
-            throw MacroError.message("@Storable requires a string key as first argument")
+            throw MacroError.message("@\(name) requires a string key as first argument")
         }
         let keyExpr = firstArg.expression.trimmedDescription
-        
-        // Check for optional store parameter
-        var storeExpr = ".shared"
-        for arg in arguments.dropFirst() {
-            if arg.label?.text == "store" {
-                storeExpr = arg.expression.trimmedDescription
-            }
-        }
-        
-        // Extract default value if present
+        let storeExpr = arguments.dropFirst().first { $0.label?.text == "store" }?.expression.trimmedDescription ?? ".shared"
+
         let defaultExpr: String
         if let initializer = binding.initializer {
             defaultExpr = initializer.value.trimmedDescription
         } else if typeName.hasSuffix("?") {
             defaultExpr = "nil"
         } else {
-            throw MacroError.message("@Storable requires a default value for non-optional types")
+            throw MacroError.message("@\(name) requires a default value for non-optional types")
         }
-        
+
         let backingName = "_\(identifier)_stor"
-        
-        // Generate backing storage as a simple private let.
-        // StorableBackend is Sendable and handles MainActor dispatch internally.
         let backingDecl: DeclSyntax = """
-            private let \(raw: backingName) = StorableBackend<\(raw: typeName)>(key: \(raw: keyExpr), default: \(raw: defaultExpr), store: \(raw: storeExpr))
+            private let \(raw: backingName) = StorableBackend<\(raw: typeName)>(key: \(raw: keyExpr), default: \(raw: defaultExpr), \(raw: storeLabel): \(raw: storeExpr))
             """
-        
-        return [backingDecl]
+        let projection: DeclSyntax = """
+            var $\(raw: identifier): StorableBackend<\(raw: typeName)>.Binding {
+                \(raw: backingName).binding
+            }
+            """
+        return [backingDecl, projection]
+    }
+
+    private func identifier(of declaration: some DeclSyntaxProtocol) throws -> String {
+        guard let varDecl = declaration.as(VariableDeclSyntax.self),
+              let binding = varDecl.bindings.first,
+              let identifier = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else {
+            throw MacroError.message("@\(name) can only be applied to stored properties")
+        }
+        return identifier
     }
 }
 
@@ -140,7 +140,7 @@ public struct StorableMacro: AccessorMacro, PeerMacro {
 
 enum MacroError: Error, CustomStringConvertible {
     case message(String)
-    
+
     var description: String {
         switch self {
         case .message(let text): text

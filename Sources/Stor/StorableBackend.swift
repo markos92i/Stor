@@ -6,60 +6,41 @@
 //
 
 import Foundation
-import Synchronization
+import SwiftUI
 
-/// Backing storage for `@Storable` macro. Bridges to `StorableRegistry` for reactivity.
+/// Backing storage for `@Storable` and `@Keychain`. Bridges to `StorableRegistry` for reactivity.
 ///
 /// Thread-safe and `Sendable`. Can be initialized and accessed from any context.
-/// Writes from background threads are dispatched to MainActor automatically.
 public struct StorableBackend<T: Sendable>: Sendable {
-    
+
     private let key: String
     private let defaultValue: T
     private let store: Stor
-    
-    /// Hydrated initial value, cached for synchronous access.
-    private let initialValue: T
-    
-    /// Creates a backend and hydrates the initial value from disk synchronously.
+
     public init(key: String, default defaultValue: T, store: Stor = .shared) {
         self.key = key
         self.defaultValue = defaultValue
         self.store = store
-        
-        // Hydrate from disk synchronously (nonisolated context)
-        if let data = store.backend.readSync(key),
-           let decoded: T = StorableCoder.decode(data, as: T.self, using: store.decoder) {
-            self.initialValue = decoded
-        } else {
-            self.initialValue = defaultValue
-        }
-        
-        // Schedule registry hydration on MainActor (for subscription setup)
-        let k = key
-        let d = defaultValue
-        let s = store
-        Task { @MainActor in
-            _ = StorableRegistry.shared.hydrate(k, default: d, store: s)
-        }
     }
-    
+
+    public init(key: String, default defaultValue: T, keychain: KeychainStore) {
+        self.init(key: key, default: defaultValue, store: keychain.stor)
+    }
+
     /// Current value.
     ///
-    /// - Reading: Returns cached value. If on MainActor, establishes SwiftUI observation.
-    /// - Writing: Persists to `Stor`. If on MainActor, updates registry immediately.
-    ///   If on background, dispatches to MainActor for UI update.
+    /// - On the main actor: the registry's value, which establishes SwiftUI observation.
+    /// - Elsewhere: the store's newest value (a write not persisted yet, else the backend).
+    /// - Writing records the value at once and persists it in the background.
     public var value: T {
         get {
             if Thread.isMainThread {
                 return MainActor.assumeIsolated {
-                    StorableRegistry.shared.get(key, default: initialValue)
+                    StorableRegistry.shared.get(key, default: defaultValue, store: store)
                 }
-            } else {
-                // Background read: return cached initial value
-                // (registry may have newer value but we can't access it safely)
-                return initialValue
             }
+            if case .found(let value) = store.lookup(key, as: T.self) { return value }
+            return defaultValue
         }
         nonmutating set {
             if Thread.isMainThread {
@@ -67,13 +48,19 @@ public struct StorableBackend<T: Sendable>: Sendable {
                     StorableRegistry.shared.set(key, newValue, store: store)
                 }
             } else {
-                // Background write: dispatch to MainActor for UI update
-                // Also persist directly for immediate disk write
-                Task { await store.set(key, newValue) }
+                store.persist(key, newValue)
+                let (key, store) = (key, store)
                 Task { @MainActor in
-                    StorableRegistry.shared.setFromExternal(key, newValue)
+                    StorableRegistry.shared.setFromExternal(key, newValue, store: store)
                 }
             }
         }
+    }
+
+    public typealias Binding = SwiftUI.Binding<T>
+
+    /// What `$property` returns.
+    public var binding: Binding {
+        Binding(get: { value }, set: { value = $0 })
     }
 }

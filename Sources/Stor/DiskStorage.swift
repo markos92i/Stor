@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Logy
 
 // MARK: - DiskStorage
 
@@ -15,6 +16,7 @@ public actor DiskStorage: StorageBackend {
     public nonisolated let directory: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private nonisolated let log = Logy<StorLog>()
 
     public init(directory: URL, encoder: JSONEncoder, decoder: JSONDecoder) {
         self.directory = directory
@@ -23,14 +25,20 @@ public actor DiskStorage: StorageBackend {
         Self.createDirectoryIfNeeded(at: directory)
     }
 
+    public nonisolated var location: String { "disk:\(directory.path())" }
+
     // MARK: - StorageBackend
 
     public func write(_ data: Data, for key: String) {
-        try? data.write(to: fileURL(for: key), options: .atomic)
+        do {
+            try data.write(to: fileURL(for: key), options: .atomic)
+        } catch {
+            log.log(.failed(key: key, store: .disk, step: "write", detail: error.localizedDescription))
+        }
     }
 
     public func read(_ key: String) -> Data? {
-        try? Data(contentsOf: fileURL(for: key))
+        if case .found(let data) = readSync(key) { data } else { nil }
     }
 
     public func readAll() -> [String: Data] {
@@ -51,7 +59,11 @@ public actor DiskStorage: StorageBackend {
     public func remove(_ key: String) {
         let url = fileURL(for: key)
         guard FileManager.default.fileExists(atPath: url.path()) else { return }
-        try? FileManager.default.removeItem(at: url)
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            log.log(.failed(key: key, store: .disk, step: "remove", detail: error.localizedDescription))
+        }
     }
 
     public func removeAll() {
@@ -63,8 +75,16 @@ public actor DiskStorage: StorageBackend {
         Self.createDirectoryIfNeeded(at: directory)
     }
 
-    public nonisolated func readSync(_ key: String) -> Data? {
-        try? Data(contentsOf: fileURL(for: key))
+    /// A file that exists but can't be read (e.g. protected while the device is locked) is `unavailable`.
+    public nonisolated func readSync(_ key: String) -> ReadResult {
+        let url = fileURL(for: key)
+        guard FileManager.default.fileExists(atPath: url.path()) else { return .missing }
+        do {
+            return .found(try Data(contentsOf: url))
+        } catch {
+            log.log(.unavailable(key: key, store: .disk, detail: error.localizedDescription))
+            return .unavailable
+        }
     }
 
     // MARK: - Helpers
