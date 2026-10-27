@@ -205,9 +205,8 @@ public actor Stor {
                 clear(write, for: key)
                 return
             }
-            let interval = log.begin("write", key, on: kind.channel)
-            await backend.write(data, for: key)
-            log.log(.write(key: key, store: kind, bytes: data.count, elapsed: log.end(interval)))
+            let (_, elapsed) = await log.measure("write", key, on: kind.channel) { await backend.write(data, for: key) }
+            log.log(.write(key: key, store: kind, bytes: data.count, elapsed: elapsed))
             clear(write, for: key)
             notifySubscribers(for: key, data: data)
         } else {
