@@ -6,8 +6,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/markos92i/Logy.git",
       "state" : {
-        "revision" : "75d3d7353ce1936cc4814f00cb22c66e6139c2c2",
-        "version" : "1.0.0"
+        "revision" : "48be637ff416b2c343d500274d59492b1f876677",
+        "version" : "1.0.1"
       }
     },
     {
